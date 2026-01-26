@@ -61,7 +61,8 @@ print_menu() {
     echo "  3) Delete worktree"
     echo "  4) List all worktrees"
     echo "  5) Fetch all branches for a repo"
-    echo "  6) Exit"
+    echo "  6) Refresh all repos (pull main/master)"
+    echo "  7) Exit"
     echo ""
 }
 
@@ -73,6 +74,7 @@ select_menu_action() {
         "Delete worktree"
         "List all worktrees"
         "Fetch all branches for a repo"
+        "Refresh all repos (pull main/master)"
         "Exit"
     )
 
@@ -84,12 +86,13 @@ select_menu_action() {
             "Delete worktree") echo "3" ;;
             "List all worktrees") echo "4" ;;
             "Fetch all branches for a repo") echo "5" ;;
-            "Exit") echo "6" ;;
+            "Refresh all repos (pull main/master)") echo "6" ;;
+            "Exit") echo "7" ;;
             *) echo "" ;;
         esac
     else
         print_menu
-        read -p "Enter choice (1-6): " choice
+        read -p "Enter choice (1-7): " choice
         echo "$choice"
     fi
 }
@@ -247,6 +250,69 @@ fetch_branches() {
     fi
 }
 
+# Refresh all repos by pulling main/master branch
+refresh_all_repos() {
+    echo -e "${YELLOW}Refreshing all repositories...${NC}\n"
+
+    local repos=($(get_repos))
+    local success_count=0
+    local fail_count=0
+    local skipped_count=0
+
+    for repo in "${repos[@]}"; do
+        local repo_path="${OFFICE_DIR}/$repo"
+        cd "$repo_path" || continue
+
+        # Determine the default branch (main or master)
+        local default_branch=""
+        if git show-ref --verify --quiet refs/remotes/origin/main; then
+            default_branch="main"
+        elif git show-ref --verify --quiet refs/remotes/origin/master; then
+            default_branch="master"
+        else
+            echo -e "${YELLOW}[SKIP]${NC} $repo - no main/master branch found"
+            ((skipped_count++))
+            continue
+        fi
+
+        # Check if we're on the default branch and it's clean
+        local current_branch=$(git branch --show-current 2>/dev/null)
+
+        if [ "$current_branch" = "$default_branch" ]; then
+            # Check for uncommitted changes
+            if ! git diff --quiet || ! git diff --cached --quiet; then
+                echo -e "${YELLOW}[SKIP]${NC} $repo - uncommitted changes on $default_branch"
+                ((skipped_count++))
+                continue
+            fi
+
+            echo -e "${BLUE}[PULL]${NC} $repo ($default_branch)..."
+            if git pull --ff-only origin "$default_branch" 2>/dev/null; then
+                echo -e "${GREEN}[OK]${NC}   $repo - updated $default_branch"
+                ((success_count++))
+            else
+                echo -e "${RED}[FAIL]${NC} $repo - pull failed"
+                ((fail_count++))
+            fi
+        else
+            # Not on default branch, just fetch
+            echo -e "${BLUE}[FETCH]${NC} $repo (on $current_branch, fetching $default_branch)..."
+            if git fetch origin "$default_branch" 2>/dev/null; then
+                echo -e "${GREEN}[OK]${NC}   $repo - fetched $default_branch"
+                ((success_count++))
+            else
+                echo -e "${RED}[FAIL]${NC} $repo - fetch failed"
+                ((fail_count++))
+            fi
+        fi
+    done
+
+    echo ""
+    echo -e "${CYAN}========================================${NC}"
+    echo -e "${GREEN}Success: $success_count${NC} | ${RED}Failed: $fail_count${NC} | ${YELLOW}Skipped: $skipped_count${NC}"
+    echo -e "${CYAN}========================================${NC}"
+}
+
 # Create worktree from existing branch
 create_worktree_existing() {
     local repo=$(select_repo "Select repository for worktree")
@@ -273,13 +339,12 @@ create_worktree_existing() {
     echo -e "${BLUE}Creating worktree...${NC}"
     cd "$repo_path" || return 1
 
-    # Check if it's a remote branch that doesn't exist locally
+    # Always create worktree from origin to ensure we have the latest remote version
+    # Delete local branch if it exists so we can recreate it from origin
     if git show-ref --verify --quiet "refs/heads/$branch"; then
-        git worktree add "$worktree_path" "$branch"
-    else
-        git worktree add "$worktree_path" -b "$branch" "origin/$branch" 2>/dev/null || \
-        git worktree add "$worktree_path" "$branch"
+        git branch -D "$branch" 2>/dev/null
     fi
+    git worktree add "$worktree_path" -b "$branch" "origin/$branch"
 
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}Worktree created successfully!${NC}"
@@ -340,12 +405,8 @@ create_worktree_new_branch() {
     echo -e "${BLUE}Creating worktree with new branch...${NC}"
     cd "$repo_path" || return 1
 
-    # Create worktree with new branch based on the selected base
-    if git show-ref --verify --quiet "refs/heads/$base_branch"; then
-        git worktree add -b "$new_branch" "$worktree_path" "$base_branch"
-    else
-        git worktree add -b "$new_branch" "$worktree_path" "origin/$base_branch"
-    fi
+    # Always create worktree from origin to ensure we have the latest remote version
+    git worktree add -b "$new_branch" "$worktree_path" "origin/$base_branch"
 
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}Worktree created successfully with new branch '${new_branch}'!${NC}"
@@ -489,6 +550,9 @@ main() {
                 [ -n "$repo" ] && fetch_branches "$repo"
                 ;;
             6)
+                refresh_all_repos
+                ;;
+            7)
                 echo -e "${GREEN}Goodbye!${NC}"
                 exit 0
                 ;;
